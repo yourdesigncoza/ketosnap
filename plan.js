@@ -112,6 +112,7 @@ self.KETO_PLAN = {
       'Eat slowly and stop when you\'re satisfied, not full',
     ] },
     { title: 'Snacks if needed (one a day)', items: [
+      'Half a glass (about 125 g) of plain double-cream yoghurt with 1 tsp psyllium husk, a pinch of Ceylon cinnamon and a little stevia. Stir, let it thicken for 5 minutes, and drink a glass of water with it',
       '1 boiled egg',
       '30 g cheese (matchbox size)',
       '½ avo with lemon and pepper',
@@ -126,6 +127,7 @@ self.KETO_PLAN = {
       'Sugar, sweets, cake and biscuits',
       'Fruit juice and fizzy drinks',
       'Tomato sauce, chutney and bottled sauces',
+      'Flavoured or fruit yoghurt (full of sugar). Plain double-cream only',
       'Chilli and hot spices, like peri-peri, cayenne and hot curry. Sweet peppers and onions are fine',
       'Stock cubes, gravy and soup powders (very salty)',
       'Braai salt, braai spice and chicken spice (very salty)',
@@ -140,6 +142,7 @@ self.KETO_PLAN = {
       'Nuts: a small handful at most',
       'Fruit: a few berries now and then',
       'Carrots and tomato: a little is fine',
+      'Psyllium husk: 1 tsp at a time, always with water. Take any medication 2 hours before or after it',
     ] },
     { title: 'The first week', items: [
       'Expect a few tired days and weaker spin sessions while your body adapts. It usually passes within one to two weeks.',
@@ -311,6 +314,7 @@ self.KETO_PLAN = {
       ['Avocados', '3 (one ripe, two firm)'],
       ['Lemons', '4'],
       ['Frozen broccoli', '1 bag (1 kg). A broccoli and cauliflower mix is fine'],
+      ['Plain double-cream yoghurt', '1 tub (500 g or 1 kg), for the afternoon snack'],
     ] },
     { title: 'Every 2 or 3 weeks', items: [
       ['Frozen hake fillets, plain', '1 box (800 g)'],
@@ -325,6 +329,8 @@ self.KETO_PLAN = {
       ['Mayonnaise', ''],
       ['Black pepper, sweet paprika, mixed herbs', 'No salt added'],
       ['Rooibos tea', ''],
+      ['Psyllium husk', '1 bag (150 g)'],
+      ['Ceylon cinnamon and stevia', 'Each lasts months'],
     ] },
   ],
 };
