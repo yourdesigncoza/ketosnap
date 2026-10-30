@@ -75,8 +75,10 @@ self.KetoCloud = {
     await authed(`/rest/v1/meals?id=eq.${encodeURIComponent(id)}`, {
       method: 'PATCH', headers: { ...JSON_HEADERS, Prefer: 'return=minimal' }, body: JSON.stringify({ deleted: true, photo: null, updated: Date.now() }),
     });
-    if (photo) await authed('/storage/v1/object/photos/' + photo, { method: 'DELETE' }).catch((e) => { if (e.status !== 404 && e.status !== 400) throw e; });
+    if (photo) await self.KetoCloud.dropPhoto(photo);
   },
+  // A photo already gone counts as deleted.
+  dropPhoto: (path) => authed('/storage/v1/object/photos/' + path, { method: 'DELETE' }).catch((e) => { if (e.status !== 404 && e.status !== 400) throw e; }),
 
   putPhoto: (path, blob) => authed('/storage/v1/object/photos/' + path, { method: 'POST', headers: { 'Content-Type': 'image/jpeg', 'x-upsert': 'true' }, body: blob }),
   getPhoto: async (path) => (await authed('/storage/v1/object/authenticated/photos/' + path)).blob(),

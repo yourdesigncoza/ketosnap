@@ -11,7 +11,12 @@ up to Supabase once you sign in, and meal checks run through a Supabase function
 - **Week**: Monday (Day 1) to Sunday (Day 7), every meal with portions, plus the portion guide and the rules.
 - **Shopping**: the weekly list with quantities. Tick items into the trolley; tap to put one back.
   "Start next week's list" clears the ticks.
-- **History**: every day you logged. Tap one to see or add its meals.
+- **History**: every day you logged and every weekly review. Tap a day to see or add its meals.
+- **Notes**: a box on each day for anything that affected it: feeling ill, no spin, a party, your weight.
+- **Weekly review**: from Monday, Today offers last week's review: the numbers, your notes and room for a comment.
+  Tap **Write my review** for what went well, what pulled you off plan and one thing to focus on next week. Writing
+  it also clears that week's photos and keeps small thumbnails. The focus stays on Today all week, and a streak
+  counts your good days in a row.
 
 ## Install on the phone
 

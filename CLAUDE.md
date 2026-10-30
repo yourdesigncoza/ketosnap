@@ -48,8 +48,12 @@ curl -s -H "apikey: $SK" "https://yzwrywrrcdfzcrahdcgl.supabase.co/rest/v1/meals
 
 There are no tests. Verify in a browser at phone width (412x915). `window.KetoSnap` exposes `state`, `entries()`,
 `addEntry(fields)`, `handlePhoto(file)`, `analyze(entry)`, `tidy(result)`, `planDay(date)`, `autoSlot(date)`,
-`push()`, `pull()`, `sync()`; `window.KetoCloud` is the Supabase client. Testing against the live project writes to
-the real account: delete test rows afterwards (`DELETE /rest/v1/meals?id=in.(...)` with the secret key).
+`push()`, `pull()`, `sync()`, `weekNumbers(monday)`, `weekBrief(monday, comment)`, `writeReview(monday)`,
+`streak(date)`, `render()`; `window.KetoCloud` is the Supabase client. To test anything that syncs or calls the model
+without touching the live account, stay signed out and swap `KetoCloud`'s methods (`saveMeal`, `putPhoto`,
+`dropPhoto`, `dropMeal`, `meals`, `getPhoto`, `checkMeal`) for stand-ins in the page; `KetoCloud.user` can then be
+faked. To test a prompt for real, send the captured messages straight to OpenRouter with the function's `MODEL`.
+Testing against the live project writes to the real account: remove test rows with the app's Delete (see Gotchas).
 When testing with Playwright, a reload needs a changed query string (`/?r=2#today`): going to the same URL with a
 different hash only fires `hashchange` and keeps the old script in memory.
 
@@ -71,16 +75,19 @@ different hash only fires `hashchange` and keeps the old script in memory.
 - `plan.js` sets `self.KETO_PLAN`: the days (Monday first), each with `meals: [[label, text, photo] x3]` and `todo`
   (strings, or `[text, recipe id]`), the `guides` (portions, hunger, snacks, drinks, cut out, go easy, first week;
   all sent to the model), the `recipes` (not sent), the shopping groups, the carb target and `photo(id)`, the one
-  place that turns a photo id into its path. It is the only copy of the plan in the app. The shared plan page (published online, local copy
-  `~/zoot/projects/thisandthat/keto/keto-week.html`) mirrors it: change both.
+  place that turns a photo id into its path. It is the only copy of the plan in the app. The shared plan page
+  (published online, local copy `~/zoot/projects/thisandthat/keto/keto-week.html`) mirrors it: change both.
 - `app.js` is one IIFE, read top to bottom:
-  1. **State** `{ ticks, gone, pulled }` in `localStorage['ketosnap.v1']`. `ticks` is the shopping list, keyed by item
-     name; `gone` holds deletes not yet sent; `pulled` is the newest server `updated` already merged.
+  1. **State** `{ ticks, gone, stale, pulled }` in `localStorage['ketosnap.v1']`. `ticks` is the shopping list, keyed
+     by item name; `gone` holds deletes not yet sent; `stale` holds server photos to delete after a weekly review;
+     `pulled` is the newest server `updated` already merged.
   2. **Meals** in IndexedDB (`ketosnap` / `entries`), loaded into `entries` on start. An entry is
      `{ id, date, slot: 0|1|2|'extra', auto, created, updated, text, photo: Blob|null, status, result, error, dirty,
      photoKey }`. `status` is `waiting` (signed out or offline, retried on open and on `online`), `checking` (memory
      only), `done` or `failed` (manual "Check again"). Every change goes through `store()`, which bumps `updated`, sets
-     `dirty` and calls `sync()`.
+     `dirty` and calls `sync()`. Day notes (`slot: 'note'`, id `note-<date>`) and weekly reviews (`slot: 'review'`,
+     id `review-<Monday>`, status `draft` or `done`) are entries too, so they store and sync with the same code;
+     `entriesOn()` returns meals only (`isMeal`). The `meals` table's slot check allows both (second migration).
   3. **Dates**: Monday is Day 1 (`dayIndex`). A photo goes to the meal due by the clock today (before 11 breakfast,
      before 16 lunch, then dinner); a second photo for a filled meal is an extra. On past days it goes to the first
      open meal. `auto: true` lets the model re-file it (a coffee at lunchtime becomes an extra); picking a meal
@@ -94,9 +101,18 @@ different hash only fires `hashchange` and keeps the old script in memory.
      then dirty meals (photo first, to `photos/<user id>/<meal id>.jpg`, then an upsert). `pull()` fetches rows with
      `updated > pulled`, oldest first; the newer `updated` wins and a dirty local meal is never overwritten.
      `catchUp()` (start, sign-in, `online`) runs pull, push, then checks waiting meals.
-  6. **UI**: hash routing (`#today`, `#week`, `#shop`, `#history`, `#day/YYYY-MM-DD`), DOM built with `el()`, full
-     re-render on every change. The meal sheet is one `<dialog>` re-rendered by `refresh()` while a check runs.
-  7. **Backup** (Menu, a spare beside sync): `exportBackup()` writes one JSON file (`ticks` plus every meal, photos as
+  6. **Notes, review, streak**: weeks run Monday to Sunday. From Monday, Today shows last week's card (numbers from
+     `weekNumbers`, his day notes, a comment box). "Write my review" is one model call (`REVIEW_SYSTEM` +
+     `weekBrief`) through the same function; the answer `{ wins, slips, focus, cheer }` is the review's `result`.
+     Writing it also runs `retirePhotos()`: each checked photo of that week becomes a 120 px thumbnail in
+     `result.stamp`, the photo leaves IndexedDB, and its server copy goes into `stale` for `push()` to delete after
+     the row is saved. Once written, Today shows the week's focus with the review folded under it; History lists every
+     review. `streak()` counts good days (three meals checked, none off plan, carbs at or under `carbHigh`).
+  7. **UI**: hash routing (`#today`, `#week`, `#shop`, `#history`, `#day/YYYY-MM-DD`), DOM built with `el()` (children
+     may be nested arrays), full re-render on every change; `render()` keeps the cursor in a text box it redraws.
+     The meal sheet is one `<dialog>` re-rendered by `refresh()` while a check runs. `fold()` is the one open/close
+     section (recipes, reviews) and remembers which are open across redraws.
+  8. **Backup** (Menu, a spare beside sync): `exportBackup()` writes one JSON file (`ticks` plus every meal, photos as
      data URLs) and shares or downloads it. `importBackup()` merges by meal id, skipping ids already present, and
      clears `photoKey` so imported meals and photos go up on the next sync.
 

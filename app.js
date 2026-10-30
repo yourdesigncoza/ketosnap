@@ -11,15 +11,19 @@ const SEEN_KEY = 'ketosnap.seen';
 const DB_NAME = 'ketosnap';
 const PHOTO_MAX_PX = 1024;
 const EXTRA = 'extra';
+const NOTE = 'note';      // the day's own note, one per day
+const REVIEW = 'review';  // a week's review, dated its Monday
+const STAMP_PX = 120;     // a reviewed meal's photo shrinks to this
 const MAIN_SLOTS = [0, 1, 2];
 const VERDICTS = { on_plan: 'On plan', close: 'Close', off_plan: 'Off plan' };
 
 // ---------- shopping ticks and sync bookkeeping ----------
 // gone: deleted meals still to be marked deleted on the server. pulled: the newest server change already merged.
+// stale: server photos to delete, from meals whose week has been reviewed.
 let state = load();
 
 function load() {
-  const empty = { ticks: {}, gone: [], pulled: 0 };
+  const empty = { ticks: {}, gone: [], stale: [], pulled: 0 };
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
     if (s) return { ...empty, ...s };
@@ -36,6 +40,8 @@ function save() {
 //          status: 'waiting'|'checking'|'done'|'failed', result, error, dirty, photoKey }
 // auto: the app guessed the slot, so the model may move it (a coffee at lunchtime is an extra, not lunch).
 // dirty: changed since the last sync. photoKey: the photo's path on the server once uploaded.
+// Day notes (slot 'note', id note-<date>) and weekly reviews (slot 'review', id review-<Monday>, status 'draft' or
+// 'done') are entries too, so they store and sync exactly like meals. result.stamp holds a reviewed meal's thumbnail.
 let entries = [];
 
 const db = new Promise((resolve, reject) => {
@@ -91,7 +97,8 @@ function dateLabel(date) {
 // ---------- meal helpers ----------
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-const entriesOn = (date) => entries.filter((e) => e.date === date).sort((a, b) => a.created - b.created);
+const isMeal = (e) => e.slot !== NOTE && e.slot !== REVIEW;
+const entriesOn = (date) => entries.filter((e) => e.date === date && isMeal(e)).sort((a, b) => a.created - b.created);
 const inSlot = (date, slot) => entriesOn(date).filter((e) => e.slot === slot);
 const slotName = (date, slot) => (slot === EXTRA ? 'Extra' : planDay(date).meals[slot][0]);
 const isFree = (date, slot) => !inSlot(date, slot).length;
@@ -121,13 +128,16 @@ function dayTotals(date) {
 // ---------- the model (behind the check-meal function, which holds the key and picks the model) ----------
 const askModel = (system, userContent) => cloud.checkMeal([{ role: 'system', content: system }, { role: 'user', content: userContent }]);
 
+const SPIN = 'On spin days he spins for 45 minutes in the morning and eats breakfast afterwards.';
+const guideLines = () => PLAN.guides.map((g) => `${g.title}: ${g.items.join('; ')}.`);
+
 function planBrief(date) {
   const day = planDay(date);
   return [
     `Target: ${PLAN.carbs}.`,
-    `It is ${day.name}, a ${day.kind.toLowerCase()}. On spin days he spins for 45 minutes in the morning and eats breakfast afterwards.`,
+    `It is ${day.name}, a ${day.kind.toLowerCase()}. ${SPIN}`,
     `The plan for the day: ${day.meals.map(([w, m]) => `${w}: ${m}`).join(' | ')}.`,
-    ...PLAN.guides.map((g) => `${g.title}: ${g.items.join('; ')}.`),
+    ...guideLines(),
   ].join('\n');
 }
 
@@ -164,10 +174,11 @@ Write plainly, to "you". Never use em dashes. If there is no food or drink in th
   return tidy(await askModel(system, content));
 }
 
-// The model's answer, trimmed to what the screen shows. Em dashes become commas: the user never wants them.
+// The model's answers, trimmed to what the screen shows. Em dashes become commas: the user never wants them.
+const plain = (s) => String(s || '').replace(/\s*—\s*/g, ', ').trim();
+const list = (a, max) => (Array.isArray(a) ? a.map(plain).filter(Boolean).slice(0, max) : []);
+
 function tidy(r) {
-  const plain = (s) => String(s || '').replace(/\s*—\s*/g, ', ').trim();
-  const list = (a, max) => (Array.isArray(a) ? a.map(plain).filter(Boolean).slice(0, max) : []);
   if (!r || r.food === false) return { food: false, title: 'No food found', items: [], verdict: null, notes: [], net_carbs: 0, tip: '' };
   return {
     food: true,
@@ -212,6 +223,146 @@ async function retryWaiting() {
   retrying = false;
 }
 
+// ---------- notes, the weekly review and the streak ----------
+// A week runs Monday to Sunday, like the plan. From Monday, Today offers last week's review: the numbers, the day
+// notes and a comment box, then one model call when he taps "Write my review". Writing it means the week's checks
+// stand, so its photos shrink to thumbnails.
+const weekStart = (date) => addDays(date, -dayIndex(date));
+const weekDays = (monday) => [0, 1, 2, 3, 4, 5, 6].map((i) => addDays(monday, i));
+const weekMeals = (monday) => weekDays(monday).flatMap(entriesOn);
+
+const blank = (id, date, slot, status) => ({ id, date, slot, auto: false, created: Date.now(), updated: 0, text: '', photo: null, status, result: null, error: '' });
+const noteFor = (date) => entries.find((e) => e.id === 'note-' + date) || blank('note-' + date, date, NOTE, 'done');
+const reviewFor = (monday) => entries.find((e) => e.id === 'review-' + monday) || blank('review-' + monday, monday, REVIEW, 'draft');
+const reviews = () => entries.filter((e) => e.slot === REVIEW && e.status === 'done').sort((a, b) => b.date.localeCompare(a.date));
+
+// Notes and the week's comment save themselves a moment after the last key, so nothing typed is lost.
+const typing = new Map();
+function typed(entry, text) {
+  entry.text = text;
+  if (!entries.includes(entry)) entries.push(entry);
+  clearTimeout(typing.get(entry.id));
+  typing.set(entry.id, setTimeout(() => store(entry), 800));
+}
+
+function weekNumbers(monday) {
+  const days = weekDays(monday).filter((d) => entriesOn(d).length);
+  const totals = days.map(dayTotals);
+  const sum = (k) => totals.reduce((n, t) => n + t[k], 0);
+  return {
+    meals: days.reduce((n, d) => n + MAIN_SLOTS.filter((s) => inSlot(d, s).length).length, 0),
+    on: sum('on'), close: sum('close'), off: sum('off'),
+    extras: days.reduce((n, d) => n + inSlot(d, EXTRA).length, 0),
+    days: days.length,
+    avg: days.length ? Math.round(sum('carbs') / days.length) : 0,
+    inTarget: totals.filter((t) => t.carbs <= PLAN.carbHigh).length,
+  };
+}
+
+// The same lines on the card and in the brief the model reads.
+const weekStats = (n) => [
+  ['Meals logged', `${n.meals} of ${7 * MAIN_SLOTS.length}`],
+  ['On plan', n.on], ['Close', n.close], ['Off plan', n.off],
+  ['Snacks and drinks', n.extras],
+  ['Net carbs a day', `about ${n.avg} g`],
+  [`Days at or under ${PLAN.carbHigh} g`, `${n.inTarget} of ${n.days}`],
+];
+
+const weekLabel = (monday) => `${dayMonth(monday)} to ${dayMonth(addDays(monday, 6))}`;
+
+// Keep personal health details out of this prompt: the code is public. His own notes reach the model as data.
+const REVIEW_SYSTEM = () => `You review one week of a keto-style eating plan for a man in South Africa who wants steady weight loss
+and is cutting back on salt. Be a kind, practical coach: specific and honest, never scolding.
+Target: ${PLAN.carbs}. ${SPIN}
+${guideLines().join('\n')}
+You get the week's numbers, every meal with its check, and his own notes. Take his notes seriously: illness, a missed
+spin session or a party explains a slip, so say so kindly, then look for the habit behind the rest.
+Return ONLY this JSON:
+{"wins": ["..."], "slips": ["..."], "focus": "...", "cheer": "..."}
+- wins: 2 or 3 short, specific things that went well, naming the days or meals.
+- slips: up to 2 short patterns that pulled him off plan, naming the days. Empty when there were none.
+- focus: one concrete habit to work on next week, in one sentence.
+- cheer: one short, warm closing line.
+Write plainly, to "you". Never use em dashes.`;
+
+function weekBrief(monday, comment) {
+  const meal = (e) => {
+    const r = e.result;
+    if (!r || !r.food) return `${slotName(e.date, e.slot)}: ${e.text || 'a photo'} (not checked)`;
+    const why = r.notes.length ? `: ${r.notes.join('; ')}` : '';
+    return `${slotName(e.date, e.slot)}: ${r.title}${e.text ? ` (he wrote "${e.text}")` : ''}, ${VERDICTS[r.verdict].toLowerCase()}, ${r.net_carbs} g${why}`;
+  };
+  const day = (d) => {
+    const lines = entriesOn(d).map(meal);
+    const missing = MAIN_SLOTS.filter((s) => !inSlot(d, s).length).map((s) => slotName(d, s).toLowerCase());
+    const note = noteFor(d).text.trim();
+    return [`${planDay(d).name} ${dayMonth(d)}, ${planDay(d).kind.toLowerCase()}:`,
+      ...lines.map((l) => `- ${l}`),
+      missing.length ? `- Not logged: ${missing.join(', ')}` : '',
+      lines.length ? `- Day total: about ${dayTotals(d).carbs} g net carbs` : '',
+      note ? `- His note: ${note}` : '',
+    ].filter(Boolean).join('\n');
+  };
+  return [
+    `The week of ${weekLabel(monday)}.`,
+    `Numbers: ${weekStats(weekNumbers(monday)).map(([k, v]) => `${k.toLowerCase()} ${v}`).join('; ')}.`,
+    ...weekDays(monday).map(day),
+    `His comment on the week: ${comment.trim() || 'none'}`,
+  ].join('\n\n');
+}
+
+const tidyReview = (r) => ({ wins: list(r && r.wins, 3), slips: list(r && r.slips, 2), focus: plain(r && r.focus), cheer: plain(r && r.cheer), written: Date.now() });
+
+let writing = null; // the Monday whose review is being written
+async function writeReview(monday) {
+  const review = reviewFor(monday);
+  if (!entries.includes(review)) entries.push(review);
+  clearTimeout(typing.get(review.id));
+  writing = monday;
+  refresh();
+  try {
+    review.result = tidyReview(await askModel(REVIEW_SYSTEM(), weekBrief(monday, review.text)));
+    review.status = 'done';
+    await store(review);
+    await retirePhotos(monday);
+  } catch (e) {
+    console.warn(e);
+    toast(`Couldn't write the review (${e.message}). Try again.`);
+  }
+  writing = null;
+  refresh();
+}
+
+// Once the week is reviewed, its checked photos have done their job: each becomes a small thumbnail kept in the
+// result, and the full photo leaves the phone and the server.
+async function retirePhotos(monday) {
+  for (const e of weekMeals(monday).filter((x) => x.photo && x.result)) {
+    e.result = { ...e.result, stamp: await dataUrl(await shrink(e.photo, STAMP_PX, 0.6)) };
+    if (e.photoKey) state.stale.push(e.photoKey);
+    e.photo = null;
+    e.photoKey = null;
+    dropPhotoUrl(e.id);
+    await store(e);
+  }
+  save();
+}
+
+// A good day: all three meals logged and checked, none off plan, at or under the top of the carb target.
+function goodDay(date) {
+  const t = dayTotals(date);
+  return MAIN_SLOTS.every((s) => inSlot(date, s).some((e) => e.result && e.result.food)) && !t.off && t.carbs <= PLAN.carbHigh;
+}
+
+// Good days in a row up to today. Today counts once it is done; unfinished it does not break the run, but an
+// off-plan meal or too many carbs today does.
+function streak(date) {
+  const t = dayTotals(date);
+  if (t.off || t.carbs > PLAN.carbHigh) return 0;
+  let n = 0;
+  for (let d = goodDay(date) ? date : addDays(date, -1); goodDay(d); d = addDays(d, -1)) n++;
+  return n;
+}
+
 // ---------- logging a meal ----------
 let pendingSlot = null; // the meal chosen before the camera opened; null means pick it by the clock
 
@@ -240,16 +391,16 @@ async function handlePhoto(file) {
   catch (e) { console.warn(e); toast('Photo failed: ' + e.message); }
 }
 
-function shrink(file) {
+function shrink(file, maxPx = PHOTO_MAX_PX, quality = 0.8) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const s = Math.min(1, PHOTO_MAX_PX / Math.max(img.width, img.height));
+      const s = Math.min(1, maxPx / Math.max(img.width, img.height));
       const c = document.createElement('canvas');
       c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
       c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
       URL.revokeObjectURL(img.src);
-      c.toBlob((b) => (b ? resolve(b) : reject(new Error('could not shrink image'))), 'image/jpeg', 0.8);
+      c.toBlob((b) => (b ? resolve(b) : reject(new Error('could not shrink image'))), 'image/jpeg', quality);
     };
     img.onerror = () => reject(new Error('could not read image'));
     img.src = URL.createObjectURL(file);
@@ -263,11 +414,16 @@ const dataUrl = (blob) => new Promise((resolve, reject) => {
   r.readAsDataURL(blob);
 });
 
+// A reviewed meal keeps only its thumbnail, so without typed text there is nothing left to check again.
+const canCheck = (e) => !!(e.photo || e.text);
+
 async function moveEntry(entry, slot) {
   if (entry.slot === slot) return;
   entry.slot = slot;
   entry.auto = false;
-  await check(entry);
+  if (canCheck(entry)) { await check(entry); return; }
+  await store(entry);
+  refresh();
 }
 
 async function deleteEntry(entry) {
@@ -313,6 +469,12 @@ async function push() {
     if (e.updated === stamp) e.dirty = false; // changed while sending: it goes again on the next round
     await persist(e);
   }
+  // Last, so no row still points at a photo that is gone.
+  for (const path of [...state.stale]) {
+    await cloud.dropPhoto(path);
+    state.stale = state.stale.filter((p) => p !== path);
+    save();
+  }
 }
 
 let syncing = false;
@@ -342,9 +504,9 @@ async function pull() {
         if (local) { entries = entries.filter((e) => e !== local); await forget(local.id); dropPhotoUrl(local.id); changed = true; }
       } else if (!state.gone.some((g) => g.id === r.id)) {
         const entry = Object.assign(local || {}, {
-          id: r.id, date: r.date, slot: r.slot === EXTRA ? EXTRA : Number(r.slot), auto: r.auto, created: r.created,
+          id: r.id, date: r.date, slot: /^\d$/.test(r.slot) ? Number(r.slot) : r.slot, auto: r.auto, created: r.created,
           updated: r.updated, text: r.text, status: r.status, result: r.result, error: r.error, dirty: false,
-          photo: local?.photo ?? (r.photo ? await cloud.getPhoto(r.photo) : null), photoKey: r.photo,
+          photo: r.photo ? local?.photo ?? await cloud.getPhoto(r.photo) : null, photoKey: r.photo,
         });
         if (!local) entries.push(entry);
         await persist(entry);
@@ -375,7 +537,7 @@ const el = (tag, attrs = {}, ...children) => {
     else if (k in n && k !== 'style') n[k] = v;
     else n.setAttribute(k, v);
   }
-  for (const c of children) if (c != null && c !== false) n.append(c);
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) n.append(c);
   return n;
 };
 const svg = (markup) => { const t = el('template'); t.innerHTML = markup; return t.content.firstElementChild; };
@@ -414,6 +576,7 @@ function verdictPill(entry) {
 
 function thumb(entry) {
   if (entry && entry.photo) return el('img', { className: 'thumb', src: photoUrl(entry), alt: '' });
+  if (entry && entry.result && entry.result.stamp) return el('img', { className: 'thumb', src: entry.result.stamp, alt: '' });
   return el('span', { className: 'thumb blank' }, svg(entry ? '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 7h14M5 12h14M5 17h9"/></svg>' : ICON_CAMERA));
 }
 
@@ -436,6 +599,9 @@ const viewDate = () => route.date || today();
 
 function render() {
   const view = $('#view');
+  // A redraw (a meal check landing, a sync) must not pull the cursor out of the box being typed in.
+  const active = view.contains(document.activeElement) && document.activeElement.id ? document.activeElement : null;
+  const caret = active && [active.id, active.selectionStart, active.selectionEnd];
   view.replaceChildren();
   $('#back-btn').hidden = route.view !== 'day';
   for (const b of document.querySelectorAll('.tabs [data-tab]')) {
@@ -444,6 +610,8 @@ function render() {
     if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   }
   ({ today: renderDay, day: renderDay, week: renderWeek, shop: renderShop, history: renderHistory })[route.view](view);
+  const again = caret && document.getElementById(caret[0]);
+  if (again) { again.focus(); again.setSelectionRange?.(caret[1], caret[2]); }
 }
 
 // Re-draw the screen and the open meal, if any, after a meal changes.
@@ -473,6 +641,11 @@ function renderDay(view) {
       el('button', { className: 'hero-btn', on: { click: () => snap(next) } }, svg(ICON_CAMERA), `Snap your ${when.toLowerCase()}`)));
   }
 
+  if (isToday) {
+    const last = addDays(weekStart(date), -7);
+    if (weekMeals(last).length) view.append(reviewCard(last));
+  }
+
   const meals = el('ul', { className: 'meals' });
   for (const slot of MAIN_SLOTS) {
     const logged = inSlot(date, slot);
@@ -491,8 +664,17 @@ function renderDay(view) {
   if (extras.length) view.append(el('ul', { className: 'meals' }, ...extras.map(mealRow)));
   else view.append(el('p', { className: 'hint-line' }, 'Snacks and drinks go here. One snack a day at most.'));
 
-  view.append(typeForm(), carbCard(date));
+  view.append(typeForm(), carbCard(date),
+    el('h2', { className: 'section' }, 'Notes'),
+    textBox(noteFor(date), 'Anything that affected the day? Feeling ill, no spin, a party, your weight at the pharmacy.', 'Notes for the day'),
+    el('p', { className: 'hint-line' }, 'Your notes go into the weekly review.'));
 }
+
+// A box that saves as you type (see typed()). The id lets render() keep the cursor in it.
+const textBox = (entry, placeholder, label) => el('textarea', {
+  className: 'note-box', id: 'box-' + entry.id, rows: 3, placeholder, value: entry.text, 'aria-label': label,
+  on: { input: (e) => typed(entry, e.target.value) },
+});
 
 function mealRow(entry) {
   const r = entry.result;
@@ -520,8 +702,6 @@ function todoCard(items, title) {
 }
 
 // A to-do is text, or [text, recipe id] when it needs cooking; the recipe opens under it.
-// Open recipes stay open across re-renders, so one being read does not snap shut when a meal check lands.
-const openHowTo = new Set();
 
 function todoItem(t) {
   const [text, id] = Array.isArray(t) ? t : [t];
@@ -530,14 +710,14 @@ function todoItem(t) {
 }
 
 function howTo(id, r) {
-  const list = (tag, items) => el(tag, {}, ...items.map((i) => el('li', {}, i)));
+  const bullets = (tag, items) => el(tag, {}, ...items.map((i) => el('li', {}, i)));
   const facts = [['Makes', r.makes], ['Air fryer', r.airfryer], ['Oven', r.oven], ['Time', r.time]].filter(([, v]) => v);
-  const box = el('details', { className: 'how', open: openHowTo.has(id), on: { toggle: () => { if (box.open) openHowTo.add(id); else openHowTo.delete(id); } } },
-    el('summary', {}, `How to make ${r.title.toLowerCase()}`),
+  const box = fold(`How to make ${r.title.toLowerCase()}`, 'how-' + id,
     el('dl', { className: 'how-facts' }, ...facts.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
-    el('h3', {}, 'You need'), list('ul', r.ingredients),
-    el('h3', {}, 'Steps'), list('ol', r.steps),
-    ...(r.tips && r.tips.length ? [el('h3', {}, 'Tips'), list('ul', r.tips)] : []));
+    el('h3', {}, 'You need'), bullets('ul', r.ingredients),
+    el('h3', {}, 'Steps'), bullets('ol', r.steps),
+    r.tips && r.tips.length ? [el('h3', {}, 'Tips'), bullets('ul', r.tips)] : null);
+  box.classList.add('how');
   return box;
 }
 
@@ -576,7 +756,61 @@ function carbCard(date) {
       el('p', { className: 'carbs-line' }, `Target ${PLAN.carbLow} to ${PLAN.carbHigh} g`),
       t.checked
         ? el('ul', { className: 'tally' }, tally('on_plan', 'On plan', t.on), tally('close', 'Close', t.close), tally('off_plan', 'Off plan', t.off))
-        : el('p', { className: 'carbs-sub' }, 'Nothing checked yet')));
+        : el('p', { className: 'carbs-sub' }, 'Nothing checked yet'),
+      date === today() && streak(date) ? el('p', { className: 'streak' }, `${plural(streak(date), 'good day')} in a row`) : null));
+}
+
+// ---------- the weekly review ----------
+// On Today: last week's card. Not yet written, it shows the numbers, his notes and a comment box. Written, it shows
+// the week's focus with the full review folded under it. History keeps every written review.
+function reviewCard(monday) {
+  const review = reviewFor(monday);
+  if (review.status === 'done') {
+    return el('section', { className: 'focus' },
+      el('h2', {}, 'Your focus this week'),
+      el('p', { className: 'focus-line' }, review.result.focus),
+      fold('Read last week\'s review', 'review-' + monday, reviewBody(monday, review)));
+  }
+  return el('section', { className: 'review pending' },
+    el('h2', {}, 'Review last week'),
+    el('p', { className: 'review-when' }, weekLabel(monday)),
+    reviewBody(monday, review));
+}
+
+function reviewBody(monday, review) {
+  const done = review.status === 'done';
+  const r = review.result;
+  const notes = weekDays(monday).map((d) => [planDay(d).name, noteFor(d).text.trim()]).filter(([, t]) => t);
+  const busy = writing === monday;
+  const offline = !cloud.user() || !navigator.onLine;
+  const write = el('button', { className: 'pill-btn wide', disabled: busy || offline, on: { click: () => writeReview(monday) } },
+    busy ? 'Writing your review…' : done ? 'Write it again' : 'Write my review');
+  const comment = [
+    textBox(review, 'Anything else about the week? Ill, a party, a busy week, no spin.', 'Your comment on the week'),
+    write,
+    el('p', { className: 'hint-line' }, offline ? 'Sign in and go online to write the review.'
+      : done ? 'It reads your comment and your notes again.' : 'Writing it also clears the week\'s photos. Small thumbnails stay.'),
+  ];
+  return el('div', { className: 'review-body' },
+    el('dl', { className: 'stats' }, ...weekStats(weekNumbers(monday)).flatMap(([k, v]) => [el('div', {}, el('dt', {}, k), el('dd', {}, String(v)))])),
+    done ? [
+      el('h3', {}, 'What went well'), el('ul', {}, ...r.wins.map((w) => el('li', {}, w))),
+      r.slips.length ? [el('h3', {}, 'What pulled you off plan'), el('ul', {}, ...r.slips.map((w) => el('li', {}, w)))] : null,
+      el('h3', {}, 'Next week'), el('p', { className: 'focus-line' }, r.focus),
+      r.cheer ? el('p', { className: 'cheer' }, r.cheer) : null,
+    ].flat().filter(Boolean) : null,
+    notes.length ? [el('h3', {}, 'Your notes'), el('ul', {}, ...notes.map(([d, t]) => el('li', {}, el('b', {}, d + ': '), t)))] : null,
+    done ? fold('Add a comment', 'comment-' + monday, ...comment) : comment,
+  );
+}
+
+// A section that opens and closes (recipes, reviews). It stays open across redraws, so one being read does not
+// snap shut when a meal check lands.
+const openFolds = new Set();
+function fold(title, key, ...children) {
+  const box = el('details', { className: 'fold', open: openFolds.has(key), on: { toggle: () => { if (box.open) openFolds.add(key); else openFolds.delete(key); } } },
+    el('summary', {}, title), ...children);
+  return box;
 }
 
 // ---------- one meal ----------
@@ -593,6 +827,7 @@ function renderEntry(entry) {
   const r = entry.result;
   box.replaceChildren();
   if (entry.photo) box.append(el('img', { className: 'entry-photo', src: photoUrl(entry), alt: 'Your meal' }));
+  else if (r && r.stamp) box.append(el('img', { className: 'entry-stamp', src: r.stamp, alt: 'Your meal' }));
   box.append(el('p', { className: 'entry-meta' }, `${slotName(entry.date, entry.slot)}, ${dateLabel(entry.date)}`));
 
   if (entry.status === 'checking') {
@@ -626,7 +861,7 @@ function renderEntry(entry) {
     el('div', { className: 'row' },
       el('button', { className: 'link-btn danger', on: { click: () => { if (confirm('Delete this meal?')) deleteEntry(entry); } } }, 'Delete'),
       el('span', { className: 'spacer' }),
-      entry.status === 'checking' ? null : el('button', { className: 'link-btn', on: { click: () => check(entry) } }, 'Check again'),
+      entry.status === 'checking' || !canCheck(entry) ? null : el('button', { className: 'link-btn', on: { click: () => check(entry) } }, 'Check again'),
       el('button', { className: 'pill-btn', on: { click: () => $('#entry').close() } }, 'Done')));
 }
 
@@ -683,13 +918,18 @@ function renderShop(view) {
 
 // ---------- History ----------
 function renderHistory(view) {
-  const dates = [...new Set(entries.map((e) => e.date))].sort().reverse();
+  const dates = [...new Set(entries.filter((e) => isMeal(e) || (e.slot === NOTE && e.text.trim())).map((e) => e.date))].sort().reverse();
   view.append(el('h1', { className: 'display' }, 'History'));
+  const done = reviews();
+  if (done.length) {
+    view.append(el('h2', { className: 'section' }, 'Weekly reviews'),
+      ...done.map((r) => fold(`Week of ${weekLabel(r.date)}`, 'review-' + r.date, reviewBody(r.date, r))));
+  }
   if (!dates.length) {
     view.append(el('p', { className: 'empty' }, 'Nothing logged yet. Snap your next meal from Today.'));
     return;
   }
-  view.append(el('p', { className: 'subline' }, plural(dates.length, 'day') + ' logged'));
+  view.append(el('h2', { className: 'section' }, plural(dates.length, 'day') + ' logged'));
   const ul = el('ul', { className: 'days' });
   for (const date of dates) {
     const t = dayTotals(date);
@@ -698,8 +938,9 @@ function renderHistory(view) {
       el('span', { className: 'day-row-head' },
         el('b', {}, dateLabel(date)),
         el('span', { className: 'muted' }, `About ${t.carbs} g net carbs`)),
-      el('span', { className: 'strip' }, ...shots.slice(0, 5).map(thumb)),
-      el('span', { className: 'muted' }, t.checked ? `${t.on} on plan, ${t.close} close, ${t.off} off plan` : 'Not checked yet'))));
+      shots.length ? el('span', { className: 'strip' }, ...shots.slice(0, 5).map(thumb)) : null,
+      el('span', { className: 'muted' }, t.checked ? `${t.on} on plan, ${t.close} close, ${t.off} off plan` : shots.length ? 'Not checked yet' : 'No meals logged'),
+      noteFor(date).text.trim() ? el('span', { className: 'day-note' }, noteFor(date).text.trim()) : null)));
   }
   view.append(ul);
 }
@@ -841,7 +1082,8 @@ $('#update-btn').addEventListener('click', async () => {
 });
 
 // exposed for console testing
-window.KetoSnap = { state, entries: () => entries, addEntry, handlePhoto, analyze, tidy, planDay, autoSlot, push, pull, sync };
+window.KetoSnap = { state, entries: () => entries, addEntry, handlePhoto, analyze, tidy, planDay, autoSlot, push, pull, sync,
+  weekNumbers, weekBrief, writeReview, streak, render };
 
 readRoute();
 idb('readonly', (s) => s.getAll()).then((all) => {
