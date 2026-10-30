@@ -1,6 +1,8 @@
-importScripts('./version.js');
+importScripts('./version.js', './plan.js');
 const VERSION = 'ks-' + self.KS_VERSION;
-const ASSETS = ['./', './index.html', './style.css', './app.js', './plan.js', './cloud.js', './manifest.json', './version.js', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-512-maskable.png', './fonts/outfit-latin.woff2'];
+const ASSETS = ['./', './index.html', './style.css', './app.js', './plan.js', './cloud.js', './manifest.json', './version.js', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-512-maskable.png', './fonts/outfit-latin.woff2',
+  // Every meal photo the plan names, so the dish cards work offline.
+  ...new Set(self.KETO_PLAN.days.flatMap((d) => d.meals.map((m) => './' + self.KETO_PLAN.photo(m[2]))))];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));

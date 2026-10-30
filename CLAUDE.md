@@ -27,7 +27,13 @@ set -a; . ./.env; set +a           # load secrets for the commands below
 supabase db push -p "$supabase_db_password"                                         # apply supabase/migrations
 supabase functions deploy check-meal --project-ref yzwrywrrcdfzcrahdcgl --use-api   # ship the function
 supabase secrets set OPENROUTER_KEY="$openrouter_key" --project-ref yzwrywrrcdfzcrahdcgl
+python3 -I tools/meal-photos.py make <dir> <photo id>            # a new meal photo candidate, about US$0.07
+python3 -I tools/meal-photos.py save <photo id>=<dir>/<file>.png  # into img/meals/, 960 px JPEG
 ```
+
+A new dish in `plan.js` needs its photo: add its description to `DISHES` in `tools/meal-photos.py`, make a few
+candidates, look at each (nothing red that reads as chilli, no bread), then save the best. All ten share one style
+prompt so the cards look like one set; stock photos never matched the plan's plates.
 
 `.env` (git- and Vercel-ignored) holds `openrouter_key`, `supabase_db_password`, `ketosnap_email` and
 `ketosnap_password` (the app login).
@@ -52,7 +58,9 @@ different hash only fires `hashchange` and keeps the old script in memory.
 - Every deploy needs a bump of `KS_VERSION` in `version.js`. `sw.js` imports it for the cache name and `app.js` shows
   it in Settings and toasts "Updated to x" (`ketosnap.seen`). Online phones get new files anyway (network-first);
   the bump is what updates the worker, renames the cache (dropping old offline copies) and changes the shown version.
-- Any new static file must be added to `ASSETS` in `sw.js` or it will not be available offline.
+- Any new static file must be added to `ASSETS` in `sw.js` or it will not be available offline. Meal photos are the
+  exception: `sw.js` imports `plan.js` and caches every photo the plan names. A named photo that does not exist makes
+  the worker's install fail, so the phone never updates: check `img/meals/` has them all before shipping.
 - Vercel serves every file in this folder that `.vercelignore` does not list, and the repo is public. Any file that
   is not part of the app (notes, scripts, docs) goes into `.vercelignore`; anything private goes into `.gitignore` too.
 - The worker is network-first with `cache: 'no-cache'` (so the browser's HTTP cache never serves stale files), falls
@@ -60,9 +68,10 @@ different hash only fires `hashchange` and keeps the old script in memory.
 
 ## Architecture
 
-- `plan.js` sets `self.KETO_PLAN`: the days (Monday first), each with `meals: [[label, text] x3]` and `todo`, the
-  `guides` (portions, hunger, snacks, drinks, cut out, go easy, first week), the shopping groups and the carb target.
-  It is the only copy of the plan in the app. The shared plan page (published online, local copy
+- `plan.js` sets `self.KETO_PLAN`: the days (Monday first), each with `meals: [[label, text, photo] x3]` and `todo`
+  (strings, or `[text, recipe id]`), the `guides` (portions, hunger, snacks, drinks, cut out, go easy, first week;
+  all sent to the model), the `recipes` (not sent), the shopping groups, the carb target and `photo(id)`, the one
+  place that turns a photo id into its path. It is the only copy of the plan in the app. The shared plan page (published online, local copy
   `~/zoot/projects/thisandthat/keto/keto-week.html`) mirrors it: change both.
 - `app.js` is one IIFE, read top to bottom:
   1. **State** `{ ticks, gone, pulled }` in `localStorage['ketosnap.v1']`. `ticks` is the shopping list, keyed by item
@@ -94,6 +103,12 @@ different hash only fires `hashchange` and keeps the old script in memory.
 ## Conventions worth keeping
 
 - The user is ~60 and reads on a phone: base type 18px, rows 18px, tap targets 44px+. Do not shrink them.
+- Light theme only (he found the old dark one hard to read). Colours are tokens on `:root` in `style.css`: stone
+  page, white cards, olive for "on plan" and "do this next", apricot for "close", tomato for "off plan".
+- Plan meals show as dish cards (`dishCard()` in `app.js`): the meal written over its photo, a pale olive card when
+  there is no photo. Today's "Next up" is one big card; Week swipes sideways through each day's three.
+- A to-do that needs cooking is `[text, recipe id]` and shows a "How to make it" dropdown from `PLAN.recipes`. He has
+  never baked: recipes assume zero kitchen knowledge, air fryer first (his preference), °C, SA terms.
 - Never use em dashes in any text, in the UI or in the model's answers.
 - The code is public. Keep personal health details out of the prompt and the plan; the plan page is shown to
   other people too.
@@ -106,6 +121,12 @@ different hash only fires `hashchange` and keeps the old script in memory.
 ## Gotchas
 
 - `supabase projects api-keys` masks the secret key unless you pass `--reveal`.
+- Helper agents share the Playwright browser. Fake meals pushed into `entries()` for screenshots become real the moment
+  that browser is signed in and anything calls `store()` (a check, a move): they sync to the live account and reach
+  the phone. Keep the test browser signed out, and remove a leaked row with the app's Delete (it marks the row
+  `deleted`, so phones drop it on their next pull), not a SQL delete.
+- To sign a test browser out, remove `localStorage['ketosnap.session']`. The app's Sign out calls `/auth/v1/logout`,
+  which ends every session for the account, the phone's too.
 - CLI 2.108 `supabase config push` applied the auth settings, then failed with
   `LegacyConfigPushStorageReadNetworkError` reading the storage config. Check `/auth/v1/settings` after a push.
 - The function runs with `verify_jwt = false` (`supabase/config.toml`) and checks the caller itself via

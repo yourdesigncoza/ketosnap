@@ -464,10 +464,9 @@ function renderDay(view) {
 
   const next = isToday ? nextSlot(date) : undefined;
   if (next !== undefined) {
-    const [when, what] = day.meals[next];
+    const [when] = day.meals[next];
     view.append(el('section', { className: 'hero' },
-      el('p', { className: 'hero-when' }, `Next up: ${when.toLowerCase()}`),
-      el('p', { className: 'hero-what' }, what),
+      dishCard(day.meals[next], `Next up: ${when.toLowerCase()}`),
       el('button', { className: 'hero-btn', on: { click: () => snap(next) } }, svg(ICON_CAMERA), `Snap your ${when.toLowerCase()}`)));
   }
 
@@ -503,10 +502,40 @@ function mealRow(entry) {
     verdictPill(entry)));
 }
 
+// A plan meal as a big photo card with the meal written over it. Meals without a photo get a pale olive card.
+function dishCard([when, what, pic], tag = when) {
+  return el('div', { className: 'dish' + (pic ? ' has-photo' : '') },
+    pic ? el('img', { className: 'dish-photo', src: PLAN.photo(pic), alt: '', loading: 'lazy' }) : null,
+    el('span', { className: 'dish-tag' }, tag),
+    el('p', { className: 'dish-title' }, what));
+}
+
 function todoCard(items, title) {
   return el('section', { className: 'todo' },
     el('h2', {}, title),
-    el('ul', {}, ...items.map((t) => el('li', {}, t))));
+    el('ul', {}, ...items.map(todoItem)));
+}
+
+// A to-do is text, or [text, recipe id] when it needs cooking; the recipe opens under it.
+// Open recipes stay open across re-renders, so one being read does not snap shut when a meal check lands.
+const openHowTo = new Set();
+
+function todoItem(t) {
+  const [text, id] = Array.isArray(t) ? t : [t];
+  const r = id && PLAN.recipes && PLAN.recipes[id];
+  return el('li', {}, text, r ? howTo(id, r) : null);
+}
+
+function howTo(id, r) {
+  const list = (tag, items) => el(tag, {}, ...items.map((i) => el('li', {}, i)));
+  const facts = [['Makes', r.makes], ['Air fryer', r.airfryer], ['Oven', r.oven], ['Time', r.time]].filter(([, v]) => v);
+  const box = el('details', { className: 'how', open: openHowTo.has(id), on: { toggle: () => { if (box.open) openHowTo.add(id); else openHowTo.delete(id); } } },
+    el('summary', {}, `How to make ${r.title.toLowerCase()}`),
+    el('dl', { className: 'how-facts' }, ...facts.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+    el('h3', {}, 'You need'), list('ul', r.ingredients),
+    el('h3', {}, 'Steps'), list('ol', r.steps),
+    ...(r.tips && r.tips.length ? [el('h3', {}, 'Tips'), list('ul', r.tips)] : []));
+  return box;
 }
 
 function signinCard() {
@@ -528,20 +557,23 @@ function typeForm() {
   el('span', { className: 'type-row' }, input, el('button', { className: 'pill-btn', type: 'submit' }, 'Check')));
 }
 
+// The day's net carbs as a dial: the pale stretch is the target, the olive arc what was eaten.
 function carbCard(date) {
   const t = dayTotals(date);
   const max = Math.max(PLAN.carbHigh + 10, t.carbs + 5);
-  const pct = (g) => `${(g / max) * 100}%`;
+  const pct = (g) => (g / max) * 100;
   const over = t.carbs > PLAN.carbHigh;
-  const summary = t.checked
-    ? `${t.on} on plan, ${t.close} close, ${t.off} off plan`
-    : 'Nothing checked yet';
+  const arc = (cls, from, to) => `<circle class="${cls}" cx="60" cy="60" r="50" pathLength="100" stroke-dasharray="${to - from} 100" stroke-dashoffset="${-from}"/>`;
+  const tally = (cls, label, n) => el('li', { className: cls }, el('span', {}, label), el('b', {}, String(n)));
   return el('section', { className: 'carbs' + (over ? ' over' : '') },
-    el('p', { className: 'carbs-line' }, el('b', {}, `About ${t.carbs} g`), ` net carbs. Target ${PLAN.carbLow} to ${PLAN.carbHigh} g.`),
-    el('div', { className: 'bar', role: 'img', 'aria-label': `${t.carbs} of ${PLAN.carbHigh} grams` },
-      el('span', { className: 'band', style: `left:${pct(PLAN.carbLow)};width:${pct(PLAN.carbHigh - PLAN.carbLow)}` }),
-      el('span', { className: 'fill', style: `width:${pct(t.carbs)}` })),
-    el('p', { className: 'carbs-sub' }, summary));
+    el('div', { className: 'ring', role: 'img', 'aria-label': `About ${t.carbs} grams of net carbs, target ${PLAN.carbLow} to ${PLAN.carbHigh}` },
+      svg(`<svg viewBox="0 0 120 120" aria-hidden="true">${arc('track', 0, 100)}${arc('band', pct(PLAN.carbLow), pct(PLAN.carbHigh))}${t.carbs ? arc('fill', 0, pct(t.carbs)) : ''}</svg>`),
+      el('span', { className: 'ring-num' }, el('b', {}, `${t.carbs} g`), 'net carbs')),
+    el('div', { className: 'carbs-side' },
+      el('p', { className: 'carbs-line' }, `Target ${PLAN.carbLow} to ${PLAN.carbHigh} g`),
+      t.checked
+        ? el('ul', { className: 'tally' }, tally('on_plan', 'On plan', t.on), tally('close', 'Close', t.close), tally('off_plan', 'Off plan', t.off))
+        : el('p', { className: 'carbs-sub' }, 'Nothing checked yet')));
 }
 
 // ---------- one meal ----------
@@ -607,8 +639,8 @@ function renderWeek(view) {
       el('div', { className: 'day-head' },
         el('h2', {}, day.name),
         el('span', { className: 'pill' + (isToday ? ' on_plan' : '') }, isToday ? 'Today' : day.kind)),
-      el('dl', { className: 'plan-meals' }, ...day.meals.flatMap(([w, m]) => [el('dt', {}, w), el('dd', {}, m)])),
-      day.todo.length ? el('ul', { className: 'plan-todo' }, ...day.todo.map((t) => el('li', {}, t))) : null));
+      el('div', { className: 'dish-row' }, ...day.meals.map((m) => dishCard(m))),
+      day.todo.length ? el('ul', { className: 'plan-todo' }, ...day.todo.map(todoItem)) : null));
   });
   for (const g of PLAN.guides) {
     view.append(el('section', { className: 'guide' }, el('h2', { className: 'section' }, g.title), el('ul', {}, ...g.items.map((t) => el('li', {}, t)))));
@@ -715,7 +747,7 @@ function menuAction(action) {
 let installPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; $('#install-item').hidden = false; });
 window.addEventListener('appinstalled', () => { installPrompt = null; $('#install-item').hidden = true; toast('Installed'); });
-// Tapping the dark backdrop closes any dialog (phones have no Esc key).
+// Tapping the backdrop closes any dialog (phones have no Esc key).
 document.addEventListener('click', (e) => { if (e.target instanceof HTMLDialogElement && e.target.open) e.target.close(); });
 $('#entry').addEventListener('close', () => { openId = null; });
 $('#back-btn').addEventListener('click', () => go('history'));
