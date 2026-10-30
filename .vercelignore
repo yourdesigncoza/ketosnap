@@ -1,0 +1,8 @@
+README.md
+CLAUDE.md
+.playwright-mcp
+*.bak-*
+.devkey
+.env
+supabase
+HANDOFF.md

@@ -1,0 +1,8 @@
+.playwright-mcp/
+*.bak-*
+.devkey
+.vercel/
+.vercel
+.env
+supabase/.temp/
+HANDOFF.md
