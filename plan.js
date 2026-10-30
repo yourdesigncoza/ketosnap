@@ -328,7 +328,7 @@ self.KETO_PLAN = {
       ['Olive oil', ''],
       ['Mayonnaise', ''],
       ['Black pepper, sweet paprika, mixed herbs', 'No salt added'],
-      ['Rooibos tea', ''],
+      ['Tea: rooibos or Glen', ''],
       ['Psyllium husk', '1 bag (150 g)'],
       ['Ceylon cinnamon and stevia', 'Each lasts months'],
     ] },
