@@ -393,12 +393,15 @@ function dropPhotoUrl(id) {
 }
 
 let toastTimer;
+// The toast is a popover, so it shows above an open dialog. Showing it again lifts it above one opened since.
 function toast(msg) {
   const t = $('#toast');
+  const hide = () => { if (t.matches(':popover-open')) t.hidePopover(); };
   t.textContent = msg;
-  t.hidden = false;
+  hide();
+  t.showPopover();
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 4000);
+  toastTimer = setTimeout(hide, 4000);
 }
 
 function verdictPill(entry) {
@@ -763,7 +766,22 @@ function renderAccount() {
   $('#signin-form').hidden = !!user;
   $('#account').hidden = !user;
   if (user) $('#set-user').textContent = user.email;
+  $('#signin-error').hidden = true;
+  showPassword(false);
 }
+
+// The eye shows what was typed, so a wrong password can be fixed without typing it all again.
+function showPassword(show) {
+  $('#set-password').type = show ? 'text' : 'password';
+  $('#pw-eye').setAttribute('aria-pressed', String(show));
+  $('#pw-eye').setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+}
+$('#pw-eye').addEventListener('click', () => {
+  showPassword($('#set-password').type === 'password');
+  $('#set-password').focus();
+});
+// The error stays under the password until something is typed.
+$('#signin-form').addEventListener('input', () => { $('#signin-error').hidden = true; });
 $('#signin-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = e.submitter;
@@ -777,7 +795,10 @@ $('#signin-form').addEventListener('submit', async (e) => {
     toast('Signed in');
     catchUp();
   } catch (err) {
-    toast(err.status === 400 ? 'Wrong email or password' : 'Sign in failed: ' + err.message);
+    $('#signin-error').textContent = err.status === 400
+      ? 'Wrong email or password. Tap the eye to see what you typed.'
+      : 'Sign in failed: ' + err.message;
+    $('#signin-error').hidden = false;
   } finally {
     btn.disabled = false;
   }
